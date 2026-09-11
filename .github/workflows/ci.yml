@@ -1,0 +1,98 @@
+name: Bola Utils CI
+
+on:
+  push:
+    branches:
+      - main
+      - staging
+      - 'dev-*'
+  pull_request:
+    branches:
+      - main
+      - staging
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bola-utils-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  discover:
+    name: Discover changed utilities
+    runs-on: ubuntu-latest
+    outputs:
+      projects: ${{ steps.changed-projects.outputs.projects }}
+      has_projects: ${{ steps.changed-projects.outputs.has_projects }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Find changed utility folders
+        id: changed-projects
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          BEFORE_SHA: ${{ github.event.before }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.sha }}
+        run: python3 .github/scripts/changed_projects.py
+
+  utility-ci:
+    name: Check ${{ matrix.project }}
+    needs: discover
+    if: needs.discover.outputs.has_projects == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        project: ${{ fromJSON(needs.discover.outputs.projects) }}
+    defaults:
+      run:
+        working-directory: ${{ matrix.project }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Python utility dependencies
+        shell: bash
+        run: |
+          if [[ -f pyproject.toml ]]; then
+            python3 -m pip install --upgrade pip
+            python3 -m pip install -e ".[ci]"
+          fi
+
+      - name: Verify CI contract
+        shell: bash
+        run: |
+          for check in quality format integration; do
+            test -f "ci/${check}.sh" || {
+              echo "Missing required CI script: ci/${check}.sh" >&2
+              exit 1
+            }
+          done
+
+      - name: Quality check
+        run: bash ci/quality.sh
+
+      - name: Format check
+        run: bash ci/format.sh
+
+      - name: Integration test
+        run: bash ci/integration.sh
+
+  no-utility-changes:
+    name: No utility changes
+    needs: discover
+    if: needs.discover.outputs.has_projects != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "No utility subproject changed; repository-level checks completed."
